@@ -1,16 +1,17 @@
-// ConsentDrift Chrome Extension Popup Script
+// ConsentDrift Chrome Extension Popup Script with Authentication
 
 const BACKEND_URL = "http://localhost:8000";
 const FRONTEND_URL = "http://localhost:5173";
 
 let currentAnalysisId = null;
+let authToken = null;
+let userEmail = null;
 
 document.addEventListener("DOMContentLoaded", async () => {
   setupTabs();
   setupLinks();
   await checkBackendStatus();
-  await loadConsents();
-  await checkPendingEvidence();
+  await checkAuthSession();
   setupForms();
 });
 
@@ -39,11 +40,67 @@ async function checkBackendStatus() {
   return false;
 }
 
-// Fetch list of consents from backend
+// Check local storage for bearer token
+async function checkAuthSession() {
+  if (typeof chrome === "undefined" || !chrome.storage) {
+    showLoginView();
+    return;
+  }
+
+  chrome.storage.local.get(["auth_token", "auth_email"], async (result) => {
+    if (result.auth_token) {
+      authToken = result.auth_token;
+      userEmail = result.auth_email || "Account";
+      showAuthenticatedView();
+      await loadConsents();
+      await checkPendingEvidence();
+    } else {
+      showLoginView();
+    }
+  });
+}
+
+function showLoginView(errorMessage = null) {
+  document.getElementById("login-view").style.display = "block";
+  document.getElementById("auth-content").style.display = "none";
+  document.getElementById("user-pill").style.display = "none";
+
+  const errBanner = document.getElementById("login-error");
+  if (errorMessage) {
+    errBanner.textContent = errorMessage;
+    errBanner.style.display = "block";
+  } else {
+    errBanner.style.display = "none";
+  }
+}
+
+function showAuthenticatedView() {
+  document.getElementById("login-view").style.display = "none";
+  document.getElementById("auth-content").style.display = "block";
+
+  const userPill = document.getElementById("user-pill");
+  const emailText = document.getElementById("user-email-text");
+  emailText.textContent = userEmail || "Account";
+  userPill.style.display = "flex";
+}
+
+// Fetch list of consents from backend using Bearer token
 async function loadConsents() {
   const select = document.getElementById("consent-select");
+  if (!authToken) return;
+
   try {
-    const res = await fetch(`${BACKEND_URL}/api/consents`);
+    const res = await fetch(`${BACKEND_URL}/api/consents`, {
+      headers: {
+        "Authorization": `Bearer ${authToken}`
+      }
+    });
+
+    if (res.status === 401) {
+      handleUnauthorized();
+      return;
+    }
+
     if (!res.ok) throw new Error("Failed to load");
     const consents = await res.json();
 
@@ -69,6 +126,15 @@ async function loadConsents() {
   } catch (err) {
     select.innerHTML = '<option value="">Error connecting to backend</option>';
   }
+}
+
+function handleUnauthorized() {
+  authToken = null;
+  userEmail = null;
+  if (typeof chrome !== "undefined" && chrome.storage) {
+    chrome.storage.local.remove(["auth_token", "auth_email"]);
+  }
+  showLoginView("Session expired or invalid credentials. Please sign in again.");
 }
 
 // Check if context menu saved any pending evidence
@@ -150,6 +216,69 @@ async function populateActiveTabInfo() {
 
 // Setup form submission handlers
 function setupForms() {
+  // Login Form
+  const loginForm = document.getElementById("login-form");
+  const loginBtn = document.getElementById("login-submit-btn");
+  const demoFillBtn = document.getElementById("demo-login-fill-btn");
+  const logoutBtn = document.getElementById("logout-btn");
+
+  demoFillBtn.addEventListener("click", () => {
+    document.getElementById("login-email").value = "demo@consentdrift.app";
+    document.getElementById("login-password").value = "Demo@1234";
+  });
+
+  logoutBtn.addEventListener("click", () => {
+    authToken = null;
+    userEmail = null;
+    if (typeof chrome !== "undefined" && chrome.storage) {
+      chrome.storage.local.remove(["auth_token", "auth_email"]);
+    }
+    showLoginView();
+  });
+
+  loginForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const email = document.getElementById("login-email").value.trim();
+    const password = document.getElementById("login-password").value;
+
+    loginBtn.disabled = true;
+    loginBtn.innerHTML = "<span>Signing In...</span>";
+    document.getElementById("login-error").style.display = "none";
+
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/auth/token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password })
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || "Authentication failed.");
+      }
+
+      const tokenData = await res.json();
+      authToken = tokenData.access_token;
+      userEmail = email;
+
+      if (typeof chrome !== "undefined" && chrome.storage) {
+        chrome.storage.local.set({
+          auth_token: authToken,
+          auth_email: userEmail
+        });
+      }
+
+      showAuthenticatedView();
+      await loadConsents();
+      await checkPendingEvidence();
+    } catch (err) {
+      showLoginView(err.message || "Invalid credentials.");
+    } finally {
+      loginBtn.disabled = false;
+      loginBtn.innerHTML = "<span>Sign In</span>";
+    }
+  });
+
   // Evidence Analysis Form
   const evForm = document.getElementById("evidence-form");
   const analyseBtn = document.getElementById("analyse-btn");
@@ -173,9 +302,14 @@ function setupForms() {
     analyseBtn.innerHTML = "<span>Analyzing...</span>";
 
     try {
+      const headers = { "Content-Type": "application/json" };
+      if (authToken) {
+        headers["Authorization"] = `Bearer ${authToken}`;
+      }
+
       const res = await fetch(`${BACKEND_URL}/api/evidence`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: headers,
         body: JSON.stringify({
           consent_id: parseInt(consentId, 10),
           title: title,
@@ -184,6 +318,11 @@ function setupForms() {
           source: "Chrome Extension"
         })
       });
+
+      if (res.status === 401) {
+        handleUnauthorized();
+        return;
+      }
 
       if (!res.ok) {
         const errorData = await res.json().catch(() => ({}));
@@ -198,6 +337,11 @@ function setupForms() {
       const riskBadge = document.getElementById("result-risk-badge");
       riskBadge.className = `badge-risk risk-${risk}`;
       riskBadge.textContent = risk.replace("_", " ");
+
+      if (data.analysis.score !== undefined && data.analysis.score !== null) {
+        document.getElementById("result-score-val").textContent = data.analysis.score;
+        document.getElementById("result-score-container").style.display = "block";
+      }
 
       document.getElementById("result-mode-text").textContent = `mode: ${data.analysis.mode}`;
       document.getElementById("result-explanation").textContent = data.analysis.explanation;
@@ -251,9 +395,14 @@ function setupForms() {
     saveBaseBtn.textContent = "Saving...";
 
     try {
+      const headers = { "Content-Type": "application/json" };
+      if (authToken) {
+        headers["Authorization"] = `Bearer ${authToken}`;
+      }
+
       const res = await fetch(`${BACKEND_URL}/api/consents`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: headers,
         body: JSON.stringify({
           organisation: org,
           service_name: service,
@@ -262,6 +411,11 @@ function setupForms() {
           source_type: "official_text"
         })
       });
+
+      if (res.status === 401) {
+        handleUnauthorized();
+        return;
+      }
 
       if (!res.ok) {
         throw new Error(`Failed to save baseline: HTTP ${res.status}`);

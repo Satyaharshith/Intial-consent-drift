@@ -1,6 +1,6 @@
 # ConsentDrift Evaluation & Benchmark Report
 
-**Generated at:** 2026-11-24 07:41:14 UTC
+**Generated at:** 2026-11-24 14:17:46 UTC
 **Benchmark Dataset:** 40 curated multi-domain scenarios (10 LOW, 10 MEDIUM, 12 HIGH, 8 INSUFFICIENT_EVIDENCE)
 
 ---

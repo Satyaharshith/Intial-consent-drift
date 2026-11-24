@@ -119,6 +119,104 @@ def determine_risk(
 
     return "MEDIUM", ["Indeterminate secondary usage signals identified."], warnings
 
+SIGNAL_WEIGHTS = {
+    "SALE_OR_BROKER": 35,
+    "THIRD_PARTY_SHARING": 30,
+    "PROFILING": 25,
+    "MARKETING": 20,
+    "VAGUE_PARTNER_SHARING": 15,
+    "RETENTION_CHANGE": 15,
+    "CONSENT_WITHDRAWAL_LIMIT": 15,
+    "ANALYTICS_RESEARCH": 10,
+    "OPT_IN_OPTIONAL": -10,
+    "BENIGN_STATUS": -15
+}
+
+def calculate_score(
+    risk: str,
+    rule_signals: List[Dict[str, Any]],
+    original_purpose: str,
+    valid_quotes: List[str]
+) -> Tuple[int, Dict[str, Any]]:
+    """
+    Calculate deterministic discrepancy score (0-100) and structured breakdown.
+    Score ranges:
+      INSUFFICIENT_EVIDENCE: 0
+      LOW: 5 - 25
+      MEDIUM: 40 - 65
+      HIGH: 75 - 98
+    """
+    if risk == "INSUFFICIENT_EVIDENCE":
+        return 0, {
+            "final_score": 0,
+            "risk": risk,
+            "base_score": 0,
+            "formula": "Score = 0 (Evidence text is insufficient or lacks actionable purpose statements).",
+            "signals": []
+        }
+
+    # Base score per tier
+    base_scores = {
+        "LOW": 10,
+        "MEDIUM": 45,
+        "HIGH": 75
+    }
+    base = base_scores.get(risk, 50)
+    
+    signals_breakdown: List[Dict[str, Any]] = []
+    added_weight = 0
+
+    seen_signals = set()
+    for s in rule_signals:
+        sig = s.get("signal", "")
+        if sig in seen_signals:
+            continue
+        seen_signals.add(sig)
+
+        weight = SIGNAL_WEIGHTS.get(sig, 5)
+        is_covered = is_signal_covered(sig, original_purpose)
+        
+        # Covered signals contribute 0 to the discrepancy score
+        contribution = 0 if is_covered else weight
+        if sig == "BENIGN_STATUS":
+            contribution = -5 if risk == "LOW" else 0
+        elif sig == "OPT_IN_OPTIONAL":
+            contribution = -10
+
+        added_weight += contribution
+        signals_breakdown.append({
+            "signal": sig,
+            "matched_text": s.get("matched_text", ""),
+            "weight": weight,
+            "covered_by_baseline": is_covered,
+            "score_contribution": contribution
+        })
+
+    # Quote verification confidence boost
+    quote_bonus = min(len(valid_quotes) * 2, 6) if valid_quotes else 0
+
+    raw_score = base + added_weight + quote_bonus
+
+    # Clamp by risk tier
+    if risk == "LOW":
+        final_score = max(5, min(raw_score, 25))
+        formula = f"Base ({base}) + Purpose Alignment ({added_weight:+d}) + Quote Validation (+{quote_bonus}) = {final_score}/100"
+    elif risk == "MEDIUM":
+        final_score = max(35, min(raw_score, 68))
+        formula = f"Base ({base}) + Uncovered Secondary Signals ({added_weight:+d}) + Quote Validation (+{quote_bonus}) = {final_score}/100"
+    else:  # HIGH
+        final_score = max(75, min(raw_score, 98))
+        formula = f"Base ({base}) + Uncovered High-Impact Discrepancies ({added_weight:+d}) + Quote Validation (+{quote_bonus}) = {final_score}/100"
+
+    return final_score, {
+        "final_score": final_score,
+        "risk": risk,
+        "base_score": base,
+        "quote_bonus": quote_bonus,
+        "formula": formula,
+        "signals": signals_breakdown
+    }
+
 def generate_explanation(
     risk: str,
     original_purpose: str,

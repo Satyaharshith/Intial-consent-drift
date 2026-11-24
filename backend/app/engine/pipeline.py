@@ -1,7 +1,7 @@
 from typing import Dict, Any, List, Optional
 from app.engine.rules import detect_signals, detect_data_categories, is_signal_covered
 from app.engine.validator import validate_quotes, get_rule_quotes
-from app.engine.risk import determine_risk, generate_explanation, RECOMMENDED_ACTIONS
+from app.engine.risk import determine_risk, generate_explanation, calculate_score, RECOMMENDED_ACTIONS
 from app.engine import llm
 
 def analyze(consent: Any, evidence: Any, force_rules_only: bool = False) -> Dict[str, Any]:
@@ -107,6 +107,17 @@ def analyze(consent: Any, evidence: Any, force_rules_only: bool = False) -> Dict
         "Review the submitted evidence and consult with your privacy officer."
     )
 
+    # Score calculation
+    score, score_breakdown = calculate_score(
+        risk=risk,
+        rule_signals=rule_signals,
+        original_purpose=original_purpose,
+        valid_quotes=valid_quotes
+    )
+
+    # Highlight spans as [start, end]
+    highlight_spans = [[span["start"], span["end"]] for span in quote_spans if "start" in span and "end" in span]
+
     # Directly stated vs AI interpretation
     if mode == "hybrid" and llm_output:
         ai_interpretations = [explanation]
@@ -123,6 +134,9 @@ def analyze(consent: Any, evidence: Any, force_rules_only: bool = False) -> Dict
     return {
         "mode": mode,
         "risk": risk,
+        "score": score,
+        "score_breakdown": score_breakdown,
+        "highlight_spans": highlight_spans,
         "original_purposes": original_purposes,
         "new_purposes": new_purposes,
         "data_categories_affected": affected_categories,
@@ -135,3 +149,24 @@ def analyze(consent: Any, evidence: Any, force_rules_only: bool = False) -> Dict
         "warnings": pipeline_warnings,
         "quote_spans": quote_spans
     }
+
+class MockObject:
+    def __init__(self, **kwargs):
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+
+def analyze_playground(original_purpose: str, evidence_text: str) -> Dict[str, Any]:
+    """
+    Run lightweight, in-memory analysis for the public interactive playground.
+    Stores nothing, requires no auth.
+    """
+    mock_consent = MockObject(
+        original_purpose=original_purpose,
+        service_name="Interactive Simulator",
+        data_categories=[]
+    )
+    mock_evidence = MockObject(
+        content=evidence_text,
+        evidence_type="policy"
+    )
+    return analyze(mock_consent, mock_evidence, force_rules_only=False)
